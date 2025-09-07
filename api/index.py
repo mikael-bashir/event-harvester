@@ -141,6 +141,10 @@ async def instagram_webhook(request: Request):
 
     return JSONResponse(content={"error": "Method not allowed"}, status_code=405)
 
+@app.get("/api/health")
+async def health_check():
+    return "I'm healthy :)"
+
 @app.post("/api/cron/process-queue")
 async def cron_process_queue():
     """

@@ -111,7 +111,7 @@ class WorkerSettings:
 
 # --- API Routes ---
 
-@app.post("/api/cron/run-pipeline")
+@app.get("/api/cron/run-pipeline")
 async def cron_run_pipeline():
     """
     This single cron job handles the entire pipeline:

@@ -94,13 +94,17 @@ async def poll_instagram_and_enqueue(request: Request):
 
                     if posts:
                         for post in posts:
-                            job_data = {
-                                "post_id": post.get("id"),
-                                "post_url": post.get("permalink"),
-                                "caption": post.get("caption", "")
-                            }
-                            await arq_pool.enqueue_job("process_instagram_post", job_data)
-                            new_posts_found += 1
+                            media_type = post.get("media_type")
+
+                            if media_type == "IMAGE": # for now skip VIDEO, and CAROUSEL_ALBUM
+                                job_data = {
+                                    "post_id": post.get("id"),
+                                    "post_url": post.get("permalink"),
+                                    "caption": post.get("caption", ""),
+                                    "media_type": media_type
+                                }
+                                await arq_pool.enqueue_job("process_instagram_post", job_data)
+                                new_posts_found += 1
                     
                     # Check for the 'next' link in the 'paging' object to continue the loop
                     current_api_url = json_data.get("paging", {}).get("next")

@@ -13,7 +13,7 @@
     ],
     "crons": [
         {
-            "path": "/api/cron/run-pipeline",
+            "path": "/api/cron/poll-instagram",
             "schedule": "* * * * *"
         },
         {

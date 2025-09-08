@@ -10,5 +10,15 @@
             "src": "/(.*)",
             "dest": "api/index.py"
         }
+    ],
+    "crons": [
+        {
+            "path": "/api/cron/run-pipeline",
+            "schedule": "* * * * *"
+        },
+        {
+            "path": "/api/health",
+            "schedule": "0 0,12 * * *"
+        }
     ]
 }

@@ -2,6 +2,7 @@ import os
 import time
 import httpx
 import redis.asyncio as redis
+from contextlib import asynccontextmanager
 from arq import create_pool
 from arq.connections import RedisSettings
 from dotenv import load_dotenv
@@ -12,11 +13,25 @@ from fastapi.middleware.cors import CORSMiddleware
 # --- Environment Variable Setup ---
 load_dotenv()
 REDIS_URL = os.getenv("REDIS_URL")
-CRON_SECRET = os.getenv("CRON_SECRET") # For securing the cron endpoint
+CRON_SECRET = os.getenv("CRON_SECRET")
+
+# --- Lifespan Event for Managing Resources ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This code runs ONCE when the application starts up.
+    print("INFO:     Application startup: Creating ARQ Redis pool.")
+    app.state.arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+    yield
+    # This code runs ONCE when the application is shutting down.
+    print("INFO:     Application shutdown: Closing AR-Q Redis pool.")
+    await app.state.arq_pool.close()
 
 # --- Initialize Clients ---
-app = FastAPI(title="London Student Network Polling & Scheduling Service for Meta Subprocesses")
-ARQ_REDIS_SETTINGS = RedisSettings.from_dsn(REDIS_URL)
+app = FastAPI(
+    title="London Student Network Polling & Scheduling Service",
+    lifespan=lifespan # Attach the lifespan event manager
+)
+# This redis_client is for simple checks and can be initialized globally.
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # --- CORS Middleware ---
@@ -57,6 +72,8 @@ async def poll_instagram_and_enqueue(request: Request):
     expected_auth_header = f"Bearer {CRON_SECRET}"
     if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    arq_pool = request.app.state.arq_pool
 
     active_user_ids = await redis_client.smembers("instagram_polling_list")
     new_posts_found = 0
@@ -67,7 +84,6 @@ async def poll_instagram_and_enqueue(request: Request):
             content={"status": "complete", "message": "No active users to poll."}
         )
 
-    arq_pool = await create_pool(ARQ_REDIS_SETTINGS)
     async with httpx.AsyncClient() as client:
         for user_id in active_user_ids:
             user_cache_key = f"user:{user_id}:instagram"

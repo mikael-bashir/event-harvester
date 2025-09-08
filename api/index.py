@@ -1,5 +1,6 @@
 import os
 import json
+import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
 from google import genai
@@ -9,20 +10,23 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from datetime import datetime, timezone
+import time
+import redis.asyncio as redis
 
-# redeploy
 # --- Environment Variable Setup ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-WEBHOOK_VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "a-secret-verify-token")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # --- Initialize Clients ---
 app = FastAPI()
-# CORRECTED: Typo `Non` changed to `None`
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-# --- ARQ (Task Queue) Configuration ---
-# Using the constructor directly to initialize from a URL string.
+gemini_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+
+# CORRECTED: Using the proper from_dsn class method for ARQ settings
 ARQ_REDIS_SETTINGS = RedisSettings.from_dsn(dsn=REDIS_URL)
+
+# CORRECTED: Creating a separate, dedicated redis client for general application use
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
 
 # --- CORS Middleware ---
 origins = ["*"]
@@ -45,20 +49,18 @@ class EventDetails(BaseModel):
     host: Optional[str] = None
 
 # --- ARQ Worker Function ---
-# This function defines the job that will be run by our queue worker.
 async def process_instagram_post(ctx, job_data: dict):
     """
     This is the core task function. It takes a job from the queue,
     calls the Gemma model, and processes the result.
-    ARQ handles retries automatically based on the worker configuration.
     """
     post_url = job_data.get("post_url")
-    if not gemini_client or not post_url:
-        return "Clients not configured or post_url missing, job failed."
+    post_caption = job_data.get("caption")
+
+    if not gemini_client or not post_url or not post_caption:
+        return "Clients not configured or job data is missing."
 
     try:
-        placeholder_caption = f"This is a sample event post for {post_url}. Event: Tech Meetup on 2025-10-15 at 18:00 at The Innovation Hub, hosted by LSN."
-        
         prompt = f"""
         Analyze the following Instagram post caption to determine if it describes an event.
         If it is an event, extract the details. If a detail is not present, use null.
@@ -70,7 +72,7 @@ async def process_instagram_post(ctx, job_data: dict):
         - location: The physical address or venue name.
         - host: The name of the organization hosting.
         
-        Caption: "{placeholder_caption}"
+        Caption: "{post_caption}"
         """
         
         response = await gemini_client.aio.models.generate_content(
@@ -81,86 +83,141 @@ async def process_instagram_post(ctx, job_data: dict):
                 "response_schema": EventDetails,
             },
         )
-        
+
         parsed_response = response.parsed
-        
+
         # CORRECTED: Added a runtime type check to satisfy Pylance and ensure type safety.
         if not isinstance(parsed_response, EventDetails):
             # If the model returns something other than our Pydantic model, it's an error.
             raise TypeError(f"LLM returned an unexpected type: {type(parsed_response)}")
-
+        
         event_data: EventDetails = parsed_response
         
         if event_data and event_data.is_event:
-            # We can use the redis client provided by the ARQ context
-            redis_client = ctx['redis']
-            await redis_client.hset("processed_events", post_url, event_data.model_dump_json())
+            redis_in_ctx = ctx['redis']
+            await redis_in_ctx.hset("processed_events", post_url, event_data.model_dump_json())
         
         return f"Successfully processed {post_url}. Event detected: {event_data.is_event}"
 
     except Exception as e:
         print(f"Failed to process job for {post_url}. Error: {e}")
-        # By raising the exception, we tell ARQ that the job failed,
-        # and it will handle the retry logic automatically.
         raise
 
 # --- ARQ Worker Settings Class ---
-# This class tells ARQ which functions are available to be run as tasks.
 class WorkerSettings:
     functions = [process_instagram_post]
     redis_settings = ARQ_REDIS_SETTINGS
-    # Automatically retry failed jobs up to 2 times (3 attempts total)
     max_tries = 3
 
 # --- API Routes ---
 
-@app.api_route("/api/instagram/webhook", methods=["GET", "POST"])
-async def instagram_webhook(request: Request):
+@app.post("/api/cron/run-pipeline")
+async def cron_run_pipeline():
     """
-    Handles Instagram Webhook verification and enqueues new post events into ARQ.
+    This single cron job handles the entire pipeline:
+    1. Polls Instagram for new posts for all active users based on Redis data.
+    2. Enqueues new posts into the ARQ worker queue.
+    3. Triggers the ARQ worker to process a batch of jobs.
     """
-    if request.method == "GET":
-        verify_token = request.query_params.get("hub.verify_token")
-        if verify_token == WEBHOOK_VERIFY_TOKEN:
-            challenge = request.query_params.get("hub.challenge")
-            return Response(content=challenge, media_type="text/plain")
-        raise HTTPException(status_code=403, detail="Verification token mismatch")
+    
+    # --- POLLING PHASE ---
+    # Get the list of all users to poll from our fast Redis Set (our source of truth)
+    active_user_ids = await redis_client.smembers("instagram_polling_list")
+    new_posts_found = 0
+    
+    if not active_user_ids:
+        return JSONResponse(content={"polling_summary": "No active users to poll."})
 
-    if request.method == "POST":
-        data = await request.json()
-        if data.get("object") == "instagram" and data.get("entry"):
-            arq_pool = await create_pool(ARQ_REDIS_SETTINGS)
-            for entry in data["entry"]:
-                for change in entry.get("changes", []):
-                    if change.get("field") == "media":
-                        media_id = change["value"]["media_id"]
-                        post_url = f"https://www.instagram.com/p/{media_id}/"
-                        job_data = {"post_url": post_url}
-                        # Enqueue the job for our worker to process
+    async with httpx.AsyncClient() as client:
+        arq_pool = await create_pool(ARQ_REDIS_SETTINGS)
+        for user_id in active_user_ids:
+            user_cache_key = f"user:{user_id}:instagram"
+            # Fetch the user's data directly from Redis cache.
+            cached_data = await redis_client.hgetall(user_cache_key)
+            
+            access_token = cached_data.get("access_token")
+            last_polled_timestamp = cached_data.get("last_polled_timestamp")
+
+            if not access_token:
+                print(f"Warning: No access token found in cache for user {user_id}. Skipping.")
+                continue
+            
+            # Poll Instagram API for new posts since the last check
+            api_url = f"https://graph.instagram.com/me/media?fields=id,caption,permalink,timestamp"
+            if last_polled_timestamp:
+                api_url += f"&since={last_polled_timestamp}"
+
+            try:
+                response = await client.get(api_url, headers={"Authorization": f"Bearer {access_token}"})
+                response.raise_for_status()
+                posts = response.json().get("data", [])
+
+                if posts:
+                    for post in posts:
+                        job_data = {"post_url": post["permalink"], "caption": post.get("caption", "")}
                         await arq_pool.enqueue_job("process_instagram_post", job_data)
-        return JSONResponse(content={"status": "success"}, status_code=200)
+                        new_posts_found += 1
+                
+                # Update the last polled timestamp in Redis for this user
+                await redis_client.hset(user_cache_key, "last_polled_timestamp", int(time.time()))
 
-    return JSONResponse(content={"error": "Method not allowed"}, status_code=405)
+            except httpx.HTTPStatusError as e:
+                # This could indicate an expired token. The user would need to reconnect.
+                print(f"Error polling for user {user_id}: {e.response.text}")
+            except Exception as e:
+                print(f"An unexpected error occurred during polling for user {user_id}: {e}")
 
-@app.get("/api/health")
-async def health_check():
-    return "I'm healthy :)"
-
-@app.post("/api/cron/process-queue")
-async def cron_process_queue():
-    """
-    Triggered by a cron job, this route acts as a serverless "burst" worker.
-    It will process a batch of jobs from the queue and then exit.
-    """
+    # --- PROCESSING PHASE ---
     from arq.worker import Worker
-
     worker = Worker(
         functions=[process_instagram_post], 
         redis_settings=ARQ_REDIS_SETTINGS,
-        max_jobs=6  # Process a maximum of 6 jobs to respect the 6 RPM limit
+        max_jobs=6
     )
-    await worker.run_check() # run_check processes jobs and exits when the queue is empty or max_jobs is reached
+    await worker.run_check()
     
     return JSONResponse(content={
-        "message": f"Cron job executed. Processed up to {worker.jobs_complete} jobs."
+        "polling_summary": f"Found and enqueued {new_posts_found} new posts for {len(active_user_ids)} users.",
+        "processing_summary": f"Processed up to {worker.jobs_complete} jobs from the queue."
     })
+
+# --- CONCEPTUAL ROUTES FOR CACHE MANAGEMENT ---
+
+class ConnectRequest(BaseModel):
+    user_id: str
+    access_token: str
+
+@app.post("/api/connect-instagram")
+async def connect_instagram_account(request: ConnectRequest):
+    """
+    Conceptual: Called after your OAuth flow successfully gets a token.
+    This route saves the token to your main DB and updates the Redis cache.
+    """
+    # 1. Save to your primary "cold" database (e.g., Postgres)
+    # await your_database.save_user_token(request.user_id, request.access_token)
+    
+    # 2. Write-through to the "hot" Redis cache
+    user_cache_key = f"user:{request.user_id}:instagram"
+    await redis_client.hset(user_cache_key, mapping={
+        "access_token": request.access_token,
+        "last_polled_timestamp": int(time.time()) 
+    })
+    await redis_client.sadd("instagram_polling_list", request.user_id)
+
+    return JSONResponse(content={"status": "success", "message": f"User {request.user_id} is now being polled."})
+
+@app.post("/api/disconnect-instagram/{user_id}")
+async def disconnect_instagram_account(user_id: str):
+    """
+    Conceptual: Called when a user disconnects their account from your app.
+    This route removes data from your main DB and invalidates the Redis cache.
+    """
+    # 1. Delete from your primary "cold" database
+    # await your_database.delete_user_token(user_id)
+
+    # 2. Invalidate the "hot" Redis cache
+    await redis_client.srem("instagram_polling_list", user_id)
+    await redis_client.delete(f"user:{user_id}:instagram")
+    
+    return JSONResponse(content={"status": "success", "message": f"User {user_id} has been removed from polling."})
+

@@ -15,11 +15,11 @@ import redis.asyncio as redis
 
 # --- Environment Variable Setup ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- Initialize Clients ---
 app = FastAPI()
-gemini_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # CORRECTED: Using the proper from_dsn class method for ARQ settings
 ARQ_REDIS_SETTINGS = RedisSettings.from_dsn(dsn=REDIS_URL)
@@ -181,43 +181,12 @@ async def cron_run_pipeline():
         "processing_summary": f"Processed up to {worker.jobs_complete} jobs from the queue."
     })
 
-# --- CONCEPTUAL ROUTES FOR CACHE MANAGEMENT ---
+# seed redis for testing
+# re-read code
+# put some test logs
 
-class ConnectRequest(BaseModel):
-    user_id: str
-    access_token: str
-
-@app.post("/api/connect-instagram")
-async def connect_instagram_account(request: ConnectRequest):
-    """
-    Conceptual: Called after your OAuth flow successfully gets a token.
-    This route saves the token to your main DB and updates the Redis cache.
-    """
-    # 1. Save to your primary "cold" database (e.g., Postgres)
-    # await your_database.save_user_token(request.user_id, request.access_token)
-    
-    # 2. Write-through to the "hot" Redis cache
-    user_cache_key = f"user:{request.user_id}:instagram"
-    await redis_client.hset(user_cache_key, mapping={
-        "access_token": request.access_token,
-        "last_polled_timestamp": int(time.time()) 
-    })
-    await redis_client.sadd("instagram_polling_list", request.user_id)
-
-    return JSONResponse(content={"status": "success", "message": f"User {request.user_id} is now being polled."})
-
-@app.post("/api/disconnect-instagram/{user_id}")
-async def disconnect_instagram_account(user_id: str):
-    """
-    Conceptual: Called when a user disconnects their account from your app.
-    This route removes data from your main DB and invalidates the Redis cache.
-    """
-    # 1. Delete from your primary "cold" database
-    # await your_database.delete_user_token(user_id)
-
-    # 2. Invalidate the "hot" Redis cache
-    await redis_client.srem("instagram_polling_list", user_id)
-    await redis_client.delete(f"user:{user_id}:instagram")
-    
-    return JSONResponse(content={"status": "success", "message": f"User {user_id} has been removed from polling."})
-
+# PROD
+# encrypt tokens
+# update database table fields
+# connect to lsn database
+# update redis in lsn code

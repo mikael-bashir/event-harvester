@@ -2,3 +2,5 @@
 /venv/
 .notes.txt
 .env
+main.py
+seed.py

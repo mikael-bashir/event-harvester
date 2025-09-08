@@ -82,7 +82,7 @@ async def poll_instagram_and_enqueue(request: Request):
                 continue
 
             # This is the starting point for our pagination loop
-            current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,permalink,timestamp&since={last_polled_timestamp}"
+            current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,media_type,permalink,timestamp&since={last_polled_timestamp}"
 
             # --- PAGINATION LOGIC STARTS HERE ---
             while current_api_url:

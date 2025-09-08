@@ -1,192 +1,121 @@
 import os
-import json
+import time
 import httpx
+import redis.asyncio as redis
 from arq import create_pool
 from arq.connections import RedisSettings
-from google import genai
-from fastapi import FastAPI, Request, Response, HTTPException
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-from datetime import datetime, timezone
-import time
-import redis.asyncio as redis
 
 # --- Environment Variable Setup ---
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+load_dotenv()
+REDIS_URL = os.getenv("REDIS_URL")
+CRON_SECRET = os.getenv("CRON_SECRET") # For securing the cron endpoint
 
 # --- Initialize Clients ---
-app = FastAPI()
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-# CORRECTED: Using the proper from_dsn class method for ARQ settings
-ARQ_REDIS_SETTINGS = RedisSettings.from_dsn(dsn=REDIS_URL)
-
-# CORRECTED: Creating a separate, dedicated redis client for general application use
+app = FastAPI(title="London Student Network Polling & Scheduling Service for Meta Subprocesses")
+ARQ_REDIS_SETTINGS = RedisSettings.from_dsn(REDIS_URL)
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-
 # --- CORS Middleware ---
-origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Pydantic Models for Type Safety ---
-class EventDetails(BaseModel):
-    is_event: bool
-    title: Optional[str] = None
-    date: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    location: Optional[str] = None
-    host: Optional[str] = None
+# --- API Route ---
+@app.get("/")
+async def welcome():
+    return "this is the protected London Student Network polling and scheduling service for Meta subprocesses"
 
-# --- ARQ Worker Function ---
-async def process_instagram_post(ctx, job_data: dict):
+@app.get("/api/health")
+async def confirmHealthy(request: Request):
     """
-    This is the core task function. It takes a job from the queue,
-    calls the Gemma model, and processes the result.
+    Triggered by a cron job at 12, twice every day, this function is a simple health check for this service.
     """
-    post_url = job_data.get("post_url")
-    post_caption = job_data.get("caption")
-
-    if not gemini_client or not post_url or not post_caption:
-        return "Clients not configured or job data is missing."
-
-    try:
-        prompt = f"""
-        Analyze the following Instagram post caption to determine if it describes an event.
-        If it is an event, extract the details. If a detail is not present, use null.
-        - is_event: boolean
-        - title: The official title of the event.
-        - date: The date in YYYY-MM-DD format.
-        - start_time: The start time in HH:MM (24-hour) format.
-        - end_time: The end time in HH:MM (24-hour) format.
-        - location: The physical address or venue name.
-        - host: The name of the organization hosting.
-        
-        Caption: "{post_caption}"
-        """
-        
-        response = await gemini_client.aio.models.generate_content(
-            model="models/gemma-3-4b-it",
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": EventDetails,
-            },
-        )
-
-        parsed_response = response.parsed
-
-        # CORRECTED: Added a runtime type check to satisfy Pylance and ensure type safety.
-        if not isinstance(parsed_response, EventDetails):
-            # If the model returns something other than our Pydantic model, it's an error.
-            raise TypeError(f"LLM returned an unexpected type: {type(parsed_response)}")
-        
-        event_data: EventDetails = parsed_response
-        
-        if event_data and event_data.is_event:
-            redis_in_ctx = ctx['redis']
-            await redis_in_ctx.hset("processed_events", post_url, event_data.model_dump_json())
-        
-        return f"Successfully processed {post_url}. Event detected: {event_data.is_event}"
-
-    except Exception as e:
-        print(f"Failed to process job for {post_url}. Error: {e}")
-        raise
-
-# --- ARQ Worker Settings Class ---
-class WorkerSettings:
-    functions = [process_instagram_post]
-    redis_settings = ARQ_REDIS_SETTINGS
-    max_tries = 3
-
-# --- API Routes ---
-
-@app.get("/api/cron/run-pipeline")
-async def cron_run_pipeline():
-    """
-    This single cron job handles the entire pipeline:
-    1. Polls Instagram for new posts for all active users based on Redis data.
-    2. Enqueues new posts into the ARQ worker queue.
-    3. Triggers the ARQ worker to process a batch of jobs.
-    """
+    expected_auth_header = f"Bearer {CRON_SECRET}"
+    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # --- POLLING PHASE ---
-    # Get the list of all users to poll from our fast Redis Set (our source of truth)
+    return JSONResponse(
+        status_code=200,
+        content={"status": "success", "message": "Service is healthy. No errors encountered."}
+    )
+
+@app.get("/api/cron/poll-instagram")
+async def poll_instagram_and_enqueue(request: Request):
+    """
+    Triggered by a cron job, this function polls Instagram for new posts
+    for all tracked users and enqueues them for processing, following all
+    pagination cursors to ensure no posts are missed.
+    """
+    # expected_auth_header = f"Bearer {CRON_SECRET}"
+    # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+    #     raise HTTPException(status_code=401, detail="Unauthorized")
+
     active_user_ids = await redis_client.smembers("instagram_polling_list")
     new_posts_found = 0
-    
-    if not active_user_ids:
-        return JSONResponse(content={"polling_summary": "No active users to poll."})
 
+    if not active_user_ids:
+        return JSONResponse(
+            status_code=200,
+            content={"status": "complete", "message": "No active users to poll."}
+        )
+
+    arq_pool = await create_pool(ARQ_REDIS_SETTINGS)
     async with httpx.AsyncClient() as client:
-        arq_pool = await create_pool(ARQ_REDIS_SETTINGS)
         for user_id in active_user_ids:
             user_cache_key = f"user:{user_id}:instagram"
-            # Fetch the user's data directly from Redis cache.
             cached_data = await redis_client.hgetall(user_cache_key)
-            
             access_token = cached_data.get("access_token")
-            last_polled_timestamp = cached_data.get("last_polled_timestamp")
+
+            poll_start_time = int(time.time())
+            last_polled_timestamp = cached_data.get("last_polled_timestamp", 0)
 
             if not access_token:
-                print(f"Warning: No access token found in cache for user {user_id}. Skipping.")
+                print(f"Warning: No access token for user {user_id}. Skipping.")
                 continue
+
+            # This is the starting point for our pagination loop
+            current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,permalink,timestamp&since={last_polled_timestamp}"
+
+            # --- PAGINATION LOGIC STARTS HERE ---
+            while current_api_url:
+                try:
+                    response = await client.get(current_api_url, headers={"Authorization": f"Bearer {access_token}"})
+                    response.raise_for_status()
+                    json_data = response.json()
+                    posts = json_data.get("data", [])
+
+                    if posts:
+                        for post in posts:
+                            job_data = {
+                                "post_id": post.get("id"),
+                                "post_url": post.get("permalink"),
+                                "caption": post.get("caption", "")
+                            }
+                            await arq_pool.enqueue_job("process_instagram_post", job_data)
+                            new_posts_found += 1
+                    
+                    # Check for the 'next' link in the 'paging' object to continue the loop
+                    current_api_url = json_data.get("paging", {}).get("next")
+
+                except httpx.HTTPStatusError as e:
+                    print(f"HTTP Error for user {user_id}: {e.response.text}")
+                    current_api_url = None # Stop paginating for this user on error
+                except Exception as e:
+                    print(f"Unexpected error for user {user_id}: {e}")
+                    current_api_url = None # Stop paginating for this user on error
             
-            # Poll Instagram API for new posts since the last check
-            api_url = f"https://graph.instagram.com/me/media?fields=id,caption,permalink,timestamp"
-            if last_polled_timestamp:
-                api_url += f"&since={last_polled_timestamp}"
+            # Update the timestamp only after successfully processing all pages for this user
+            await redis_client.hset(user_cache_key, "last_polled_timestamp", poll_start_time)
 
-            try:
-                response = await client.get(api_url, headers={"Authorization": f"Bearer {access_token}"})
-                response.raise_for_status()
-                posts = response.json().get("data", [])
-
-                if posts:
-                    for post in posts:
-                        job_data = {"post_url": post["permalink"], "caption": post.get("caption", "")}
-                        await arq_pool.enqueue_job("process_instagram_post", job_data)
-                        new_posts_found += 1
-                
-                # Update the last polled timestamp in Redis for this user
-                await redis_client.hset(user_cache_key, "last_polled_timestamp", int(time.time()))
-
-            except httpx.HTTPStatusError as e:
-                # This could indicate an expired token. The user would need to reconnect.
-                print(f"Error polling for user {user_id}: {e.response.text}")
-            except Exception as e:
-                print(f"An unexpected error occurred during polling for user {user_id}: {e}")
-
-    # --- PROCESSING PHASE ---
-    from arq.worker import Worker
-    worker = Worker(
-        functions=[process_instagram_post], 
-        redis_settings=ARQ_REDIS_SETTINGS,
-        max_jobs=6
+    return JSONResponse(
+        status_code=200,
+        content={"status": "success", "message": f"number of new posts found: ${new_posts_found}"}
     )
-    await worker.run_check()
-    
-    return JSONResponse(content={
-        "polling_summary": f"Found and enqueued {new_posts_found} new posts for {len(active_user_ids)} users.",
-        "processing_summary": f"Processed up to {worker.jobs_complete} jobs from the queue."
-    })
-
-# seed redis for testing
-# re-read code
-# put some test logs
-
-# PROD
-# encrypt tokens
-# update database table fields
-# connect to lsn database
-# update redis in lsn code

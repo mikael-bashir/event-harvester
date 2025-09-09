@@ -56,6 +56,7 @@ async def confirmHealthy(request: Request):
     # expected_auth_header = f"Bearer {CRON_SECRET}"
     # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
     #     raise HTTPException(status_code=401, detail="Unauthorized")
+    # force redeployment
     
     return JSONResponse(
         status_code=200,

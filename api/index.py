@@ -3,9 +3,13 @@ import time
 import httpx
 import json
 import redis.asyncio as redis
+import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- Environment Variable Setup ---
 REDIS_URL = os.getenv("REDIS_URL")
@@ -65,48 +69,100 @@ async def poll_instagram_and_enqueue(request: Request):
     redis_client = await get_redis_client()
     
     try:
+        logger.info("Starting Instagram polling job")
         active_user_ids = await redis_client.smembers("instagram_polling_list")
         new_posts_found = 0
+        errors = []
 
         if not active_user_ids:
+            logger.info("No active users to poll")
             return JSONResponse(status_code=200, content={"status": "complete", "message": "No active users to poll."})
 
-        async with httpx.AsyncClient() as client:
+        logger.info(f"Polling {len(active_user_ids)} users")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for user_id in active_user_ids:
-                user_cache_key = f"user:{user_id}:instagram"
-                cached_data = await redis_client.hgetall(user_cache_key)
-                access_token = cached_data.get("access_token")
+                try:
+                    logger.info(f"Processing user {user_id}")
+                    user_cache_key = f"user:{user_id}:instagram"
+                    cached_data = await redis_client.hgetall(user_cache_key)
+                    access_token = cached_data.get("access_token")
 
-                poll_start_time = int(time.time())
-                last_polled_timestamp = cached_data.get("last_polled_timestamp", poll_start_time)          
-                if not access_token:
-                    print(f"Warning: No access token for user {user_id}. Skipping.")
-                    continue
+                    poll_start_time = int(time.time())
+                    last_polled_timestamp = cached_data.get("last_polled_timestamp", str(poll_start_time - 3600))  # Default to 1 hour ago
+                    
+                    if not access_token:
+                        error_msg = f"No access token for user {user_id}"
+                        logger.warning(error_msg)
+                        errors.append(error_msg)
+                        continue
 
-                current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,media_type,permalink,timestamp&since={last_polled_timestamp}"
+                    current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,media_type,permalink,timestamp&since={last_polled_timestamp}&access_token={access_token}"
 
-                while current_api_url:
-                    try:
-                        response = await client.get(current_api_url, headers={"Authorization": f"Bearer {access_token}"})
-                        response.raise_for_status()
-                        json_data = response.json()
-                        posts = json_data.get("data", [])
+                    while current_api_url:
+                        try:
+                            logger.info(f"Making API request for user {user_id}")
+                            response = await client.get(current_api_url)
+                            response.raise_for_status()
+                            json_data = response.json()
+                            
+                            if "error" in json_data:
+                                error_msg = f"Instagram API error for user {user_id}: {json_data['error']}"
+                                logger.error(error_msg)
+                                errors.append(error_msg)
+                                break
+                            
+                            posts = json_data.get("data", [])
+                            logger.info(f"Found {len(posts)} posts for user {user_id}")
 
-                        for post in posts:
-                            if post.get("media_type") == "IMAGE":
-                                job_data = { "post_id": post.get("id"), "post_url": post.get("permalink"), "caption": post.get("caption", "") }
-                                # Push a JSON string to a Redis list named 'instagram_jobs_queue'
-                                await redis_client.lpush("instagram_jobs_queue", json.dumps(job_data))
-                                new_posts_found += 1
-                        
-                        current_api_url = json_data.get("paging", {}).get("next")
-                    except Exception as e:
-                        print(f"Error processing user {user_id}: {e}")
-                        current_api_url = None
-                
-                await redis_client.hset(user_cache_key, "last_polled_timestamp", poll_start_time)
+                            for post in posts:
+                                if post.get("media_type") == "IMAGE":
+                                    job_data = { 
+                                        "user_id": user_id,
+                                        "post_id": post.get("id"), 
+                                        "post_url": post.get("permalink"), 
+                                        "caption": post.get("caption", "") 
+                                    }
+                                    await redis_client.lpush("instagram_jobs_queue", json.dumps(job_data))
+                                    new_posts_found += 1
+                                    logger.info(f"Queued new post {post.get('id')} for user {user_id}")
+                            
+                            current_api_url = json_data.get("paging", {}).get("next")
+                            
+                        except httpx.HTTPStatusError as e:
+                            error_msg = f"HTTP error for user {user_id}: {e.response.status_code} - {e.response.text}"
+                            logger.error(error_msg)
+                            errors.append(error_msg)
+                            break
+                        except Exception as e:
+                            error_msg = f"Unexpected error processing user {user_id}: {str(e)}"
+                            logger.error(error_msg)
+                            errors.append(error_msg)
+                            break
+                    
+                    await redis_client.hset(user_cache_key, "last_polled_timestamp", str(poll_start_time))
+                    logger.info(f"Updated last_polled_timestamp for user {user_id}")
+                    
+                except Exception as e:
+                    error_msg = f"Critical error processing user {user_id}: {str(e)}"
+                    logger.error(error_msg)
+                    errors.append(error_msg)
 
-        return JSONResponse(status_code=200, content={"status": "success", "message": f"number of new posts found: {new_posts_found}"})
+        response_data = {
+            "status": "success" if not errors else "partial_success",
+            "message": f"Found {new_posts_found} new posts",
+            "new_posts_found": new_posts_found,
+            "users_processed": len(active_user_ids),
+            "errors": errors if errors else None
+        }
+        
+        logger.info(f"Polling job completed: {response_data}")
+        return JSONResponse(status_code=200, content=response_data)
+    
+    except Exception as e:
+        error_msg = f"Critical error in polling job: {str(e)}"
+        logger.error(error_msg)
+        return JSONResponse(status_code=500, content={"status": "error", "message": error_msg})
     
     finally:
         await redis_client.close()

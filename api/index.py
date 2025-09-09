@@ -4,12 +4,31 @@ import httpx
 import json
 import redis.asyncio as redis
 import logging
+import sys
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-logging.basicConfig(level=logging.INFO)
+class InfoFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno <= logging.INFO
+
+# Create custom handlers
+info_handler = logging.StreamHandler(sys.stdout)
+info_handler.setLevel(logging.INFO)
+info_handler.addFilter(InfoFilter())
+
+error_handler = logging.StreamHandler(sys.stderr)
+error_handler.setLevel(logging.WARNING)
+
+# Configure logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(info_handler)
+logger.addHandler(error_handler)
+
+# Prevent duplicate logs
+logger.propagate = False
 
 # --- Environment Variable Setup ---
 REDIS_URL = os.getenv("REDIS_URL")

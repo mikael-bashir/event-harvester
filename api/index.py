@@ -30,6 +30,12 @@ logger.addHandler(error_handler)
 # Prevent duplicate logs
 logger.propagate = False
 
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.INFO)
+httpx_logger.addHandler(info_handler)
+httpx_logger.addHandler(error_handler)
+httpx_logger.propagate = False
+
 # --- Environment Variable Setup ---
 REDIS_URL = os.getenv("REDIS_URL")
 CRON_SECRET = os.getenv("CRON_SECRET")

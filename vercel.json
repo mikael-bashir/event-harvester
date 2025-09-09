@@ -10,15 +10,5 @@
             "src": "/(.*)",
             "dest": "api/index.py"
         }
-    ],
-    "crons": [
-        {
-            "path": "/api/cron/poll-instagram",
-            "schedule": "* * * * *"
-        },
-        {
-            "path": "/api/health",
-            "schedule": "0 0,12 * * *"
-        }
     ]
 }

@@ -53,9 +53,9 @@ async def confirmHealthy(request: Request):
     """
     Triggered by a cron job at 12, twice every day, this function is a simple health check for this service.
     """
-    expected_auth_header = f"Bearer {CRON_SECRET}"
-    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # expected_auth_header = f"Bearer {CRON_SECRET}"
+    # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+    #     raise HTTPException(status_code=401, detail="Unauthorized")
     
     return JSONResponse(
         status_code=200,
@@ -69,9 +69,9 @@ async def poll_instagram_and_enqueue(request: Request):
     for all tracked users and enqueues them for processing, following all
     pagination cursors to ensure no posts are missed.
     """
-    expected_auth_header = f"Bearer {CRON_SECRET}"
-    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # expected_auth_header = f"Bearer {CRON_SECRET}"
+    # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+    #     raise HTTPException(status_code=401, detail="Unauthorized")
     
     arq_pool = request.app.state.arq_pool
 
@@ -91,7 +91,8 @@ async def poll_instagram_and_enqueue(request: Request):
             access_token = cached_data.get("access_token")
 
             poll_start_time = int(time.time())
-            last_polled_timestamp = cached_data.get("last_polled_timestamp", poll_start_time)
+            # last_polled_timestamp = cached_data.get("last_polled_timestamp", poll_start_time)
+            last_polled_timestamp = 0
             if not access_token:
                 print(f"Warning: No access token for user {user_id}. Skipping.")
                 continue

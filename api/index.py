@@ -34,17 +34,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 # --- API Routes ---
 @app.get("/")
-async def welcome(request: Request):
-    expected_auth_header = f"Bearer {CRON_SECRET}"
-    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return "This is the protected London Student Network polling and scheduling service..."
+async def welcome():
+    return "This is the London Student Network polling and scheduling service..."
 
 @app.get("/api/health")
 async def confirm_healthy(request: Request):
     """A simple, secured health check for this service."""
     expected_auth_header = f"Bearer {CRON_SECRET}"
-    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+    if not CRON_SECRET:
+        raise HTTPException(status_code=500, detail="CRON_SECRET environment variable not set")
+    if request.headers.get("Authorization") != expected_auth_header:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     redis_client = await get_redis_client()
@@ -58,7 +57,9 @@ async def confirm_healthy(request: Request):
 async def poll_instagram_and_enqueue(request: Request):
     """Polls Instagram for new posts and pushes them to a Redis list."""
     expected_auth_header = f"Bearer {CRON_SECRET}"
-    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+    if not CRON_SECRET:
+        raise HTTPException(status_code=500, detail="CRON_SECRET environment variable not set")
+    if request.headers.get("Authorization") != expected_auth_header:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     redis_client = await get_redis_client()
@@ -77,7 +78,7 @@ async def poll_instagram_and_enqueue(request: Request):
                 access_token = cached_data.get("access_token")
 
                 poll_start_time = int(time.time())
-                last_polled_timestamp = cached_data.get("last_polled_timestamp", poll_start_time)       
+                last_polled_timestamp = cached_data.get("last_polled_timestamp", poll_start_time)          
                 if not access_token:
                     print(f"Warning: No access token for user {user_id}. Skipping.")
                     continue
@@ -105,7 +106,7 @@ async def poll_instagram_and_enqueue(request: Request):
                 
                 await redis_client.hset(user_cache_key, "last_polled_timestamp", poll_start_time)
 
-        return JSONResponse(status_code=200, content={"status": "success", "message": f"number of new posts found: ${new_posts_found}"})
+        return JSONResponse(status_code=200, content={"status": "success", "message": f"number of new posts found: {new_posts_found}"})
     
     finally:
         await redis_client.close()

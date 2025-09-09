@@ -34,15 +34,18 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 # --- API Routes ---
 @app.get("/")
-async def welcome():
+async def welcome(request: Request):
+    expected_auth_header = f"Bearer {CRON_SECRET}"
+    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     return "This is the protected London Student Network polling and scheduling service..."
 
 @app.get("/api/health")
 async def confirm_healthy(request: Request):
     """A simple, secured health check for this service."""
-    # expected_auth_header = f"Bearer {CRON_SECRET}"
-    # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
-    #     raise HTTPException(status_code=401, detail="Unauthorized")
+    expected_auth_header = f"Bearer {CRON_SECRET}"
+    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     redis_client = await get_redis_client()
     try:
@@ -54,9 +57,9 @@ async def confirm_healthy(request: Request):
 @app.get("/api/cron/poll-instagram")
 async def poll_instagram_and_enqueue(request: Request):
     """Polls Instagram for new posts and pushes them to a Redis list."""
-    # expected_auth_header = f"Bearer {CRON_SECRET}"
-    # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
-    #     raise HTTPException(status_code=401, detail="Unauthorized")
+    expected_auth_header = f"Bearer {CRON_SECRET}"
+    if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     redis_client = await get_redis_client()
     

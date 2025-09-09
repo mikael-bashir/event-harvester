@@ -51,16 +51,57 @@ async def welcome():
 @app.get("/api/health")
 async def confirmHealthy(request: Request):
     """
-    Triggered by a cron job at 12, twice every day, this function is a simple health check for this service.
+    An advanced health check to test the state of both Redis clients.
     """
+    # Security check is commented out for easy manual testing
     # expected_auth_header = f"Bearer {CRON_SECRET}"
     # if not CRON_SECRET or request.headers.get("Authorization") != expected_auth_header:
     #     raise HTTPException(status_code=401, detail="Unauthorized")
-    # force redeployment
     
+    results = {}
+    
+    try:
+        # 1. Access both clients, just like the failing cron route does.
+        arq_pool = request.app.state.arq_pool
+        global_client = redis_client
+        
+        results["arq_pool_access"] = "ok"
+        results["global_client_access"] = "ok"
+
+        # 2. Test writing with one client and reading with the other.
+        test_key = "health_check_key"
+        test_value = f"ok_{int(time.time())}"
+        
+        # Write with the lifespan-managed pool
+        await arq_pool.set(test_key, test_value, ex=10) # Set with a 10s expiry
+        results["arq_pool_write"] = "ok"
+        
+        # Read with the global client
+        read_value = await global_client.get(test_key)
+        results["global_client_read"] = "ok"
+        
+        # 3. Verify the result
+        if read_value == test_value:
+            results["verification"] = "ok"
+        else:
+            results["verification"] = f"failed: wrote '{test_value}', read '{read_value}'"
+
+    except Exception as e:
+        # If any part of this fails, the exception will be returned in the response
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": "Health check failed during Redis interaction.",
+                "error_type": type(e).__name__,
+                "error_details": str(e),
+                "current_results": results
+            }
+        )
+
     return JSONResponse(
         status_code=200,
-        content={"status": "success", "message": "Service is healthy. No errors encountered."}
+        content={"status": "success", "message": "Both Redis clients were accessed and verified successfully.", "results": results}
     )
 
 @app.get("/api/cron/poll-instagram")

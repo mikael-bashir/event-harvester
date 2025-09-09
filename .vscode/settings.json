@@ -1,4 +1,0 @@
-{
-    "python.languageServer": "Pylance",
-    "python.analysis.typeCheckingMode": "basic"
-}

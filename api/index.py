@@ -122,7 +122,7 @@ async def poll_instagram_and_enqueue(request: Request):
                         errors.append(error_msg)
                         continue
 
-                    current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,media_type,permalink,timestamp&since={last_polled_timestamp}&access_token={access_token}"
+                    current_api_url = f"https://graph.instagram.com/me/media?fields=id,caption,media_type,media_url,permalink,timestamp&since={last_polled_timestamp}&access_token={access_token}"
 
                     while current_api_url:
                         try:
@@ -145,7 +145,8 @@ async def poll_instagram_and_enqueue(request: Request):
                                     job_data = { 
                                         "user_id": user_id,
                                         "post_id": post.get("id"), 
-                                        "post_url": post.get("permalink"), 
+                                        "post_url": post.get("permalink"),
+                                        "media_url": post.get("media_url"),
                                         "caption": post.get("caption", "") 
                                     }
                                     await redis_client.lpush("instagram_jobs_queue", json.dumps(job_data))

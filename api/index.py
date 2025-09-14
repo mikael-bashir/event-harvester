@@ -147,7 +147,8 @@ async def poll_instagram_and_enqueue(request: Request):
                                         "post_id": post.get("id"), 
                                         "post_url": post.get("permalink"),
                                         "media_url": post.get("media_url"),
-                                        "caption": post.get("caption", "") 
+                                        "caption": post.get("caption", ""),
+                                        "post_timestamp": post.get("timestamp")
                                     }
                                     await redis_client.lpush("instagram_jobs_queue", json.dumps(job_data))
                                     new_posts_found += 1
